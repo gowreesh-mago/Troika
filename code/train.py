@@ -223,27 +223,12 @@ def evaluate(model, dataset, config):
         pair_gt = pred_dict['pair_gt']
         loss_avg = pred_dict['loss']
 
-        # For compatibility with test.test() which expects generic names
-        test_stats = test.test(
-            dataset,
-            evaluator,
-            pair_logits,      # pair logits
-            action_gt,        # action ground truth (called attr in test.test)
-            adverb_gt,        # adverb ground truth (called obj in test.test)
-            pair_gt,          # pair ground truth
-            config
-        )
-
         # Compute top-k for pairs, actions, and adverbs
         top1_pair, top5_pair = compute_topk_accuracy(pair_logits, pair_gt, k_values=[1, 5])
         top1_action, top5_action = compute_topk_accuracy(action_logits, action_gt, k_values=[1, 5])
         top1_adverb, top5_adverb = compute_topk_accuracy(adverb_logits, adverb_gt, k_values=[1, 5])
 
-        # Get accuracies from test_stats (these are 0-1, convert to percentages)
-        action_acc = test_stats.get('attr_acc', 0) * 100
-        adverb_acc = test_stats.get('obj_acc', 0) * 100
-
-        # Store all metrics
+        # Store only top-k metrics
         test_saved_results = {
             'pair_top1': round(top1_pair, 2),
             'pair_top5': round(top5_pair, 2),
@@ -251,19 +236,12 @@ def evaluate(model, dataset, config):
             'action_top5': round(top5_action, 2),
             'adverb_top1': round(top1_adverb, 2),
             'adverb_top5': round(top5_adverb, 2),
-            'action_acc': round(action_acc, 2),
-            'adverb_acc': round(adverb_acc, 2),
-            'seen_acc': round(test_stats.get('best_seen', 0), 2),
-            'unseen_acc': round(test_stats.get('best_unseen', 0), 2),
-            'harmonic_mean': round(test_stats.get('best_hm', 0), 2),
-            'AUC': round(test_stats.get('AUC', 0), 2),
             'loss': loss_avg
         }
 
         result = (f"Pair: T1={top1_pair:.1f}% T5={top5_pair:.1f}% | "
                  f"Action: T1={top1_action:.1f}% T5={top5_action:.1f}% | "
-                 f"Adverb: T1={top1_adverb:.1f}% T5={top5_adverb:.1f}% | "
-                 f"Seen={test_saved_results['seen_acc']:.1f}% Unseen={test_saved_results['unseen_acc']:.1f}% HM={test_saved_results['harmonic_mean']:.1f}%")
+                 f"Adverb: T1={top1_adverb:.1f}% T5={top5_adverb:.1f}%")
     else:
         # For composition: use original tuple format
         all_logits, all_attr_gt, all_obj_gt, all_pair_gt, loss_avg = test.predict_logits(

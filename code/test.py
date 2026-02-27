@@ -45,10 +45,9 @@ class Evaluator:
             # For ActionAdverbDataset: use actions and adverbs
             pairs = [(dset.action2idx[action], dset.adverb2idx[adverb])
                      for action, adverb in dset.all_pairs]
-            # For ActionAdverbDataset, we don't have separate train_pairs
-            # All pairs seen in training are the unique pairs in train split
-            # We'll handle this in the dataset loading
-            self.train_pairs = pairs  # Will be updated based on training data
+            # Use training pairs from dataset to determine seen/unseen split
+            self.train_pairs = [(dset.action2idx[action], dset.adverb2idx[adverb])
+                               for action, adverb in dset.train_pairs]
             self.attr2idx = dset.action2idx  # Alias for compatibility
             self.obj2idx = dset.adverb2idx   # Alias for compatibility
         else:
@@ -65,11 +64,11 @@ class Evaluator:
         # Mask over pairs that occur in closed world
         # Select set based on phase
         if is_action_adverb:
-            # For ActionAdverbDataset, we use all pairs
-            # In future, could add train/val/test pair splits
-            test_pair_set = set(dset.all_pairs)
-            test_pair_gt = set(dset.all_pairs)
-            print(f'Evaluating ActionAdverbDataset with {len(test_pair_gt)} pairs')
+            # For ActionAdverbDataset: test phase evaluates on test pairs
+            # Closed world includes train + test pairs (like CompositionDataset)
+            test_pair_set = set(dset.test_pairs + dset.train_pairs)
+            test_pair_gt = set(dset.test_pairs)
+            print(f'Evaluating ActionAdverbDataset: {len(test_pair_gt)} test pairs (Closed world: {len(test_pair_set)} pairs)')
         else:
             if dset.phase == 'train':
                 print('Evaluating with train pairs')
@@ -681,8 +680,11 @@ def test(
             [all_pred[i][k] for i in range(len(all_pred))]
         ).float()
 
+    # Use bias=0 for ActionAdverbDataset (no compositional generalization assumption)
+    # Use bias=1e3 for CompositionDataset (favors unseen compositions for AUC)
+    bias_value = 0 if isinstance(test_dataset, ActionAdverbDataset) else 1e3
     results = evaluator.score_model(
-        all_pred_dict, all_obj_gt, bias=1e3, topk=1
+        all_pred_dict, all_obj_gt, bias=bias_value, topk=1
     )
 
     attr_acc = float(torch.mean(
