@@ -264,12 +264,31 @@ class ActionAdverbDataset(Dataset):
         self.all_pairs = [(a, av) for a in self.actions for av in self.adverbs]
         self.pair2idx = {pair: i for i, pair in enumerate(self.all_pairs)}
 
+        # Track pairs that appear in training data (for seen/unseen split)
+        train_pairs_set = set(zip(train_df['clustered_action'], train_df['clustered_adverb']))
+        self.train_pairs = sorted(list(train_pairs_set))
+
+        # Track pairs in current split
+        current_pairs_set = set(zip(self.data['clustered_action'], self.data['clustered_adverb']))
+        self.phase = split  # For compatibility with CompositionDataset
+        if split == 'test':
+            self.test_pairs = sorted(list(current_pairs_set))
+            # Determine unseen pairs (in test but not in train)
+            unseen_pairs_set = current_pairs_set - train_pairs_set
+            self.val_pairs = sorted(list(unseen_pairs_set))  # For compatibility
+        else:
+            self.test_pairs = []
+            self.val_pairs = []
+
         # Compute max temporal length and feature dimensions
         self.temporal_len = self._compute_max_temporal_len()
         print(f'ActionAdverbDataset [{split}]:')
         print(f'  - Actions: {len(self.actions)}')
         print(f'  - Adverbs: {len(self.adverbs)}')
         print(f'  - Pairs: {len(self.all_pairs)}')
+        print(f'  - Train pairs: {len(self.train_pairs)}')
+        if split == 'test':
+            print(f'  - Test pairs: {len(self.test_pairs)} (Seen: {len(train_pairs_set & current_pairs_set)}, Unseen: {len(unseen_pairs_set)})')
         print(f'  - Samples: {len(self.data)}')
         print(f'  - Max temporal length: {self.temporal_len}')
         print(f'  - Flow dim: {self.flow_dim}, RGB dim: {self.rgb_dim}')

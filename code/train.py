@@ -66,8 +66,10 @@ def train_model(model, optimizer, config, train_dataset, val_dataset, test_datas
     global_step = 0
 
     for i in range(config.epoch_start, config.epochs):
+        # Get current learning rate
+        current_lr = optimizer.param_groups[0]['lr']
         progress_bar = tqdm.tqdm(
-            total=len(train_dataloader), desc="epoch % 3d" % (i + 1)
+            total=len(train_dataloader), desc=f"Epoch {i+1}/{config.epochs} | LR: {current_lr:.2e}"
         )
 
         epoch_train_losses = []
@@ -129,25 +131,29 @@ def train_model(model, optimizer, config, train_dataset, val_dataset, test_datas
 
             global_step += 1
 
-            progress_bar.set_postfix({"train loss": np.mean(epoch_train_losses[-50:])})
+            # Update progress bar with loss and current LR
+            current_lr = optimizer.param_groups[0]['lr']
+            progress_bar.set_postfix({
+                "loss": f"{np.mean(epoch_train_losses[-50:]):.4f}",
+                "lr": f"{current_lr:.2e}"
+            })
             progress_bar.update()
 
         progress_bar.close()
 
         # Compute epoch metrics
         epoch_loss = np.mean(epoch_train_losses)
-        progress_bar.write(f"epoch {i+1} train loss {epoch_loss}")
+        current_lr = optimizer.param_groups[0]['lr']
+        progress_bar.write(f"Epoch {i+1} | Loss: {epoch_loss:.4f} | LR: {current_lr:.2e}")
         train_losses.append(epoch_loss)
 
         # Compute accuracies
         if config.model_name == 'action_adverb_model' and epoch_total > 0:
-            train_action_acc = epoch_action_correct / epoch_total
-            train_adverb_acc = epoch_adverb_correct / epoch_total
-            train_pair_acc = epoch_pair_correct / epoch_total
+            train_action_acc = 100.0 * epoch_action_correct / epoch_total
+            train_adverb_acc = 100.0 * epoch_adverb_correct / epoch_total
+            train_pair_acc = 100.0 * epoch_pair_correct / epoch_total
 
-            print(f"  Train Action Acc: {train_action_acc:.4f}")
-            print(f"  Train Adverb Acc: {train_adverb_acc:.4f}")
-            print(f"  Train Pair Acc: {train_pair_acc:.4f}")
+            print(f"  Training Accuracies - Action: {train_action_acc:.2f}% | Adverb: {train_adverb_acc:.2f}% | Pair: {train_pair_acc:.2f}%")
 
             # Log to wandb
             if config.use_wandb and WANDB_AVAILABLE:
@@ -156,13 +162,16 @@ def train_model(model, optimizer, config, train_dataset, val_dataset, test_datas
                     'train/action_acc': train_action_acc,
                     'train/adverb_acc': train_adverb_acc,
                     'train/pair_acc': train_pair_acc,
+                    'train/lr_epoch': current_lr,
                     'epoch': i
                 }, step=global_step)
 
         if (i + 1) % config.save_every_n == 0:
             torch.save(model.state_dict(), os.path.join(config.save_path, f"epoch_{i}.pt"))
 
-        print("Evaluating val dataset:")
+        # Evaluate on validation/test set
+        eval_label = "test" if config.model_name == 'action_adverb_model' else "val"
+        print(f"Evaluating {eval_label} dataset:")
         val_result = evaluate(model, val_dataset, config)
         val_results.append(val_result)
 
@@ -213,24 +222,37 @@ def evaluate(model, dataset, config):
         )
     test_saved_results = dict()
     result = ""
-    key_set = ["best_seen", "best_unseen", "best_hm", "AUC", "attr_acc", "obj_acc"]
-    for key in key_set:
-        if key in test_stats:
-            result = result + key + "  " + str(round(test_stats[key], 4)) + "| "
-            test_saved_results[key] = round(test_stats[key], 4)
 
-    # Add top-k accuracies for action-adverb model
+    # Different metrics for action-adverb vs composition
     if config.model_name == 'action_adverb_model':
+        # For action-adverb: use clearer names
         top1_pair, top5_pair = compute_topk_accuracy(all_logits, all_pair_gt, k_values=[1, 5])
-        test_saved_results['top1_pair_acc'] = round(top1_pair, 4)
-        test_saved_results['top5_pair_acc'] = round(top5_pair, 4)
-        result += f"top1  {round(top1_pair, 4)}| top5  {round(top5_pair, 4)}| "
-
-        # Action and adverb accuracies
         action_acc = test_stats.get('attr_acc', 0)
         adverb_acc = test_stats.get('obj_acc', 0)
+
+        test_saved_results['top1_acc'] = round(top1_pair, 4)
+        test_saved_results['top5_acc'] = round(top5_pair, 4)
         test_saved_results['action_acc'] = round(action_acc, 4)
         test_saved_results['adverb_acc'] = round(adverb_acc, 4)
+        test_saved_results['seen_acc'] = round(test_stats.get('best_seen', 0), 4)
+        test_saved_results['unseen_acc'] = round(test_stats.get('best_unseen', 0), 4)
+        test_saved_results['harmonic_mean'] = round(test_stats.get('best_hm', 0), 4)
+        test_saved_results['AUC'] = round(test_stats.get('AUC', 0), 4)
+
+        result = (f"Top-1: {test_saved_results['top1_acc']:.2f}% | "
+                 f"Top-5: {test_saved_results['top5_acc']:.2f}% | "
+                 f"Action: {test_saved_results['action_acc']:.2f}% | "
+                 f"Adverb: {test_saved_results['adverb_acc']:.2f}% | "
+                 f"Seen: {test_saved_results['seen_acc']:.2f}% | "
+                 f"Unseen: {test_saved_results['unseen_acc']:.2f}% | "
+                 f"HM: {test_saved_results['harmonic_mean']:.2f}%")
+    else:
+        # For composition: use original format
+        key_set = ["best_seen", "best_unseen", "best_hm", "AUC", "attr_acc", "obj_acc"]
+        for key in key_set:
+            if key in test_stats:
+                result = result + key + "  " + str(round(test_stats[key], 4)) + "| "
+                test_saved_results[key] = round(test_stats[key], 4)
 
     print(result)
     test_saved_results['loss'] = loss_avg
@@ -311,16 +333,13 @@ if __name__ == "__main__":
             features_dir=config.features_dir,
             split='train'
         )
+        # For action-adverb: use test split for validation (no separate val split)
         val_dataset = ActionAdverbDataset(
-            data_dir=dataset_path,
-            features_dir=config.features_dir,
-            split='val'
-        )
-        test_dataset = ActionAdverbDataset(
             data_dir=dataset_path,
             features_dir=config.features_dir,
             split='test'
         )
+        test_dataset = val_dataset  # Use same dataset for both
 
         # Extract vocabularies and dimensions for ActionAdverbModel
         action_vocab = train_dataset.actions

@@ -111,10 +111,11 @@ class Evaluator:
 
         # open world
         if is_action_adverb:
-            # For ActionAdverbDataset, use all pairs
-            masks = [1 for _ in dset.all_pairs]
-            seen_pair_set = set(dset.all_pairs)
-            mask = [1 for _ in dset.all_pairs]
+            # For ActionAdverbDataset, use test pairs for closed mask
+            # and train pairs for seen mask
+            masks = [1 if pair in test_pair_set else 0 for pair in dset.all_pairs]
+            seen_pair_set = set(dset.train_pairs)
+            mask = [1 if pair in seen_pair_set else 0 for pair in dset.all_pairs]
         else:
             if dset.open_world:
                 masks = [1 for _ in dset.pairs]
