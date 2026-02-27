@@ -428,15 +428,20 @@ def predict_logits(model, dataset, config):
         config (argparse.ArgumentParser): config/args
 
     Returns:
-        tuple: the logits, attribute/action labels, object/adverb labels,
-            pair labels, average loss
+        For CompositionDataset:
+            tuple: (pair_logits, attr_gt, obj_gt, pair_gt, avg_loss)
+        For ActionAdverbDataset:
+            dict: {
+                'pair_logits': tensor,
+                'action_logits': tensor,
+                'adverb_logits': tensor,
+                'action_gt': tensor,
+                'adverb_gt': tensor,
+                'pair_gt': tensor,
+                'loss': float
+            }
     """
     model.eval()
-    all_attr_gt, all_obj_gt, all_pair_gt = (
-        [],
-        [],
-        [],
-    )
 
     # Check if this is ActionAdverbDataset
     is_action_adverb = isinstance(dataset, ActionAdverbDataset)
@@ -448,7 +453,14 @@ def predict_logits(model, dataset, config):
         # For ActionAdverbDataset
         all_action_indices = torch.arange(len(dataset.actions)).to(device)
         all_adverb_indices = torch.arange(len(dataset.adverbs)).to(device)
-        pairs = None  # Not used in the same way
+
+        # Initialize accumulators with clear names
+        all_pair_logits = torch.Tensor()
+        all_action_logits = torch.Tensor()
+        all_adverb_logits = torch.Tensor()
+        all_action_gt = []
+        all_adverb_gt = []
+        all_pair_gt = []
     else:
         # For CompositionDataset
         attr2idx = dataset.attr2idx
@@ -456,15 +468,19 @@ def predict_logits(model, dataset, config):
         pairs_dataset = dataset.pairs
         pairs = torch.tensor([(attr2idx[attr], obj2idx[obj])
                                     for attr, obj in pairs_dataset]).to(device)
-        all_action_indices = None
-        all_adverb_indices = None
+
+        # Initialize accumulators
+        all_logits = torch.Tensor()
+        all_attr_gt = []
+        all_obj_gt = []
+        all_pair_gt = []
 
     dataloader = DataLoader(
         dataset,
         batch_size=config.eval_batch_size,
         shuffle=False,
         num_workers=config.num_workers)
-    all_logits = torch.Tensor()
+
     loss = 0
     with torch.no_grad():
         for idx, data in tqdm(
@@ -473,30 +489,49 @@ def predict_logits(model, dataset, config):
             # Forward pass depends on dataset type
             if is_action_adverb:
                 predict = model(data, all_action_indices, all_adverb_indices)
-                # For ActionAdverbModel, use pair logits directly (index 0)
-                logits = predict[0]  # pair_logits
-                attr_truth = data['action_idx']
-                obj_truth = data['adverb_idx']
-                pair_truth = data['pair_idx']
+                # For ActionAdverbModel: [pair_logits, action_logits, adverb_logits]
+                pair_logits = predict[0].cpu()
+                action_logits = predict[1].cpu()
+                adverb_logits = predict[2].cpu()
+
+                # Accumulate logits
+                all_pair_logits = torch.cat([all_pair_logits, pair_logits], dim=0)
+                all_action_logits = torch.cat([all_action_logits, action_logits], dim=0)
+                all_adverb_logits = torch.cat([all_adverb_logits, adverb_logits], dim=0)
+
+                # Ground truth
+                all_action_gt.append(data['action_idx'])
+                all_adverb_gt.append(data['adverb_idx'])
+                all_pair_gt.append(data['pair_idx'])
             else:
                 predict = model(data, pairs)
-                logits = model.logit_infer(predict, pairs)
+                logits = model.logit_infer(predict, pairs).cpu()
+                all_logits = torch.cat([all_logits, logits], dim=0)
+
+                # Ground truth
                 attr_truth, obj_truth, pair_truth = data[1], data[2], data[3]
+                all_attr_gt.append(attr_truth)
+                all_obj_gt.append(obj_truth)
+                all_pair_gt.append(pair_truth)
 
             loss += model.loss_calu(predict, data).item()
-            logits = logits.cpu()
-            all_logits = torch.cat([all_logits, logits], dim=0)
-            all_attr_gt.append(attr_truth)
-            all_obj_gt.append(obj_truth)
-            all_pair_gt.append(pair_truth)
 
-    all_attr_gt, all_obj_gt, all_pair_gt = (
-        torch.cat(all_attr_gt).to("cpu"),
-        torch.cat(all_obj_gt).to("cpu"),
-        torch.cat(all_pair_gt).to("cpu"),
-    )
-
-    return all_logits, all_attr_gt, all_obj_gt, all_pair_gt, loss / len(dataloader)
+    # Return based on dataset type
+    if is_action_adverb:
+        return {
+            'pair_logits': all_pair_logits,
+            'action_logits': all_action_logits,
+            'adverb_logits': all_adverb_logits,
+            'action_gt': torch.cat(all_action_gt).to("cpu"),
+            'adverb_gt': torch.cat(all_adverb_gt).to("cpu"),
+            'pair_gt': torch.cat(all_pair_gt).to("cpu"),
+            'loss': loss / len(dataloader)
+        }
+    else:
+        all_attr_gt = torch.cat(all_attr_gt).to("cpu")
+        all_obj_gt = torch.cat(all_obj_gt).to("cpu")
+        all_pair_gt = torch.cat(all_pair_gt).to("cpu")
+        return all_logits, all_attr_gt, all_obj_gt, all_pair_gt, loss / len(dataloader)
 
 
 def predict_logits_text_first(model, dataset, config):

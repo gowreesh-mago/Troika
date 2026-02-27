@@ -209,9 +209,67 @@ def train_model(model, optimizer, config, train_dataset, val_dataset, test_datas
 def evaluate(model, dataset, config):
     model.eval()
     evaluator = test.Evaluator(dataset, model=None)
-    all_logits, all_attr_gt, all_obj_gt, all_pair_gt, loss_avg = test.predict_logits(
+
+    # Get all predictions
+    if config.model_name == 'action_adverb_model':
+        # For action-adverb: get dictionary with clear names
+        pred_dict = test.predict_logits(model, dataset, config)
+
+        pair_logits = pred_dict['pair_logits']
+        action_logits = pred_dict['action_logits']
+        adverb_logits = pred_dict['adverb_logits']
+        action_gt = pred_dict['action_gt']
+        adverb_gt = pred_dict['adverb_gt']
+        pair_gt = pred_dict['pair_gt']
+        loss_avg = pred_dict['loss']
+
+        # For compatibility with test.test() which expects generic names
+        test_stats = test.test(
+            dataset,
+            evaluator,
+            pair_logits,      # pair logits
+            action_gt,        # action ground truth (called attr in test.test)
+            adverb_gt,        # adverb ground truth (called obj in test.test)
+            pair_gt,          # pair ground truth
+            config
+        )
+
+        # Compute top-k for pairs, actions, and adverbs
+        top1_pair, top5_pair = compute_topk_accuracy(pair_logits, pair_gt, k_values=[1, 5])
+        top1_action, top5_action = compute_topk_accuracy(action_logits, action_gt, k_values=[1, 5])
+        top1_adverb, top5_adverb = compute_topk_accuracy(adverb_logits, adverb_gt, k_values=[1, 5])
+
+        # Get accuracies from test_stats (these are 0-1, convert to percentages)
+        action_acc = test_stats.get('attr_acc', 0) * 100
+        adverb_acc = test_stats.get('obj_acc', 0) * 100
+
+        # Store all metrics
+        test_saved_results = {
+            'pair_top1': round(top1_pair, 2),
+            'pair_top5': round(top5_pair, 2),
+            'action_top1': round(top1_action, 2),
+            'action_top5': round(top5_action, 2),
+            'adverb_top1': round(top1_adverb, 2),
+            'adverb_top5': round(top5_adverb, 2),
+            'action_acc': round(action_acc, 2),
+            'adverb_acc': round(adverb_acc, 2),
+            'seen_acc': round(test_stats.get('best_seen', 0), 2),
+            'unseen_acc': round(test_stats.get('best_unseen', 0), 2),
+            'harmonic_mean': round(test_stats.get('best_hm', 0), 2),
+            'AUC': round(test_stats.get('AUC', 0), 2),
+            'loss': loss_avg
+        }
+
+        result = (f"Pair: T1={top1_pair:.1f}% T5={top5_pair:.1f}% | "
+                 f"Action: T1={top1_action:.1f}% T5={top5_action:.1f}% | "
+                 f"Adverb: T1={top1_adverb:.1f}% T5={top5_adverb:.1f}% | "
+                 f"Seen={test_saved_results['seen_acc']:.1f}% Unseen={test_saved_results['unseen_acc']:.1f}% HM={test_saved_results['harmonic_mean']:.1f}%")
+    else:
+        # For composition: use original tuple format
+        all_logits, all_attr_gt, all_obj_gt, all_pair_gt, loss_avg = test.predict_logits(
             model, dataset, config)
-    test_stats = test.test(
+
+        test_stats = test.test(
             dataset,
             evaluator,
             all_logits,
@@ -220,42 +278,17 @@ def evaluate(model, dataset, config):
             all_pair_gt,
             config
         )
-    test_saved_results = dict()
-    result = ""
 
-    # Different metrics for action-adverb vs composition
-    if config.model_name == 'action_adverb_model':
-        # For action-adverb: use clearer names
-        top1_pair, top5_pair = compute_topk_accuracy(all_logits, all_pair_gt, k_values=[1, 5])
-        action_acc = test_stats.get('attr_acc', 0)
-        adverb_acc = test_stats.get('obj_acc', 0)
-
-        test_saved_results['top1_acc'] = round(top1_pair, 4)
-        test_saved_results['top5_acc'] = round(top5_pair, 4)
-        test_saved_results['action_acc'] = round(action_acc, 4)
-        test_saved_results['adverb_acc'] = round(adverb_acc, 4)
-        test_saved_results['seen_acc'] = round(test_stats.get('best_seen', 0), 4)
-        test_saved_results['unseen_acc'] = round(test_stats.get('best_unseen', 0), 4)
-        test_saved_results['harmonic_mean'] = round(test_stats.get('best_hm', 0), 4)
-        test_saved_results['AUC'] = round(test_stats.get('AUC', 0), 4)
-
-        result = (f"Top-1: {test_saved_results['top1_acc']:.2f}% | "
-                 f"Top-5: {test_saved_results['top5_acc']:.2f}% | "
-                 f"Action: {test_saved_results['action_acc']:.2f}% | "
-                 f"Adverb: {test_saved_results['adverb_acc']:.2f}% | "
-                 f"Seen: {test_saved_results['seen_acc']:.2f}% | "
-                 f"Unseen: {test_saved_results['unseen_acc']:.2f}% | "
-                 f"HM: {test_saved_results['harmonic_mean']:.2f}%")
-    else:
-        # For composition: use original format
+        test_saved_results = dict()
+        result = ""
         key_set = ["best_seen", "best_unseen", "best_hm", "AUC", "attr_acc", "obj_acc"]
         for key in key_set:
             if key in test_stats:
                 result = result + key + "  " + str(round(test_stats[key], 4)) + "| "
                 test_saved_results[key] = round(test_stats[key], 4)
+        test_saved_results['loss'] = loss_avg
 
     print(result)
-    test_saved_results['loss'] = loss_avg
     return test_saved_results
 
 def compute_topk_accuracy(logits, targets, k_values=[1, 5]):

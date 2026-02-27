@@ -48,26 +48,36 @@ def get_optimizer(model, config):
 
 
 def get_scheduler(optimizer, config, num_batches=-1):
-    if not hasattr(config, 'scheduler'):
+    if not hasattr(config, 'scheduler') or config.scheduler is None:
         return None
+
+    scheduler = None
     if config.scheduler == 'StepLR':
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=config.step_size, gamma=config.gamma)
-    elif config.scheduler == 'linear_w_warmup' or config.scheduler == 'cosine_w_warmup':
-        assert num_batches != -1
+    elif config.scheduler == 'linear_w_warmup':
+        assert num_batches != -1, "num_batches must be provided for linear_w_warmup scheduler"
         num_training_steps = num_batches * config.epochs
         num_warmup_steps = int(config.warmup_proportion * num_training_steps)
-        if config.scheduler == 'linear_w_warmup':
-            scheduler = get_linear_schedule_with_warmup(optimizer,
-                                                num_warmup_steps=num_warmup_steps,
-                                                num_training_steps=num_training_steps)
-        if config.scheduler == 'cosine_w_warmup':
-            scheduler = get_cosine_schedule_with_warmup(optimizer,
-                                                num_warmup_steps=num_warmup_steps,
-                                                num_training_steps=num_training_steps)
+        scheduler = get_linear_schedule_with_warmup(optimizer,
+                                            num_warmup_steps=num_warmup_steps,
+                                            num_training_steps=num_training_steps)
+    elif config.scheduler == 'cosine_w_warmup':
+        assert num_batches != -1, "num_batches must be provided for cosine_w_warmup scheduler"
+        num_training_steps = num_batches * config.epochs
+        num_warmup_steps = int(config.warmup_proportion * num_training_steps)
+        scheduler = get_cosine_schedule_with_warmup(optimizer,
+                                            num_warmup_steps=num_warmup_steps,
+                                            num_training_steps=num_training_steps)
+    else:
+        raise ValueError(f"Unknown scheduler: {config.scheduler}")
+
     return scheduler
 
 
 def step_scheduler(scheduler, config, bid, num_batches):
+    if scheduler is None:
+        return None
+
     if config.scheduler in ['StepLR']:
         if bid + 1 == num_batches:    # end of the epoch
             scheduler.step()
