@@ -5,6 +5,8 @@ import numpy as np
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
+import pandas as pd
+import os
 from torchvision.transforms import (CenterCrop, Compose, InterpolationMode,
                                     Normalize, RandomHorizontalFlip,
                                     RandomPerspective, RandomRotation, Resize,
@@ -236,3 +238,109 @@ class CompositionDataset(Dataset):
 
     def __len__(self):
         return len(self.data)
+
+
+class ActionAdverbDataset(Dataset):
+    """Dataset for action-adverb classification using pre-extracted I3D features with variable temporal lengths"""
+    def __init__(self, data_dir, features_dir, split='train'):
+        self.data_dir = data_dir
+        self.features_dir = features_dir
+        self.split = split
+
+        self.data = pd.read_csv(os.path.join(data_dir, f'{split}.csv'))
+
+        # Build vocab from both train and test splits to keep indices consistent
+        train_df = pd.read_csv(os.path.join(data_dir, 'train.csv'))
+        test_df = pd.read_csv(os.path.join(data_dir, 'test.csv'))
+        all_df = pd.concat([train_df, test_df])
+        self.all_df = all_df
+
+        self.adverbs = sorted(all_df['clustered_adverb'].unique().tolist())
+        self.actions = sorted(all_df['clustered_action'].unique().tolist())
+        self.adverb2idx = {adverb: idx for idx, adverb in enumerate(self.adverbs)}
+        self.action2idx = {action: idx for idx, action in enumerate(self.actions)}
+
+        # Create all possible action-adverb pairs
+        self.all_pairs = [(a, av) for a in self.actions for av in self.adverbs]
+        self.pair2idx = {pair: i for i, pair in enumerate(self.all_pairs)}
+
+        # Compute max temporal length and feature dimensions
+        self.temporal_len = self._compute_max_temporal_len()
+        print(f'ActionAdverbDataset [{split}]:')
+        print(f'  - Actions: {len(self.actions)}')
+        print(f'  - Adverbs: {len(self.adverbs)}')
+        print(f'  - Pairs: {len(self.all_pairs)}')
+        print(f'  - Samples: {len(self.data)}')
+        print(f'  - Max temporal length: {self.temporal_len}')
+        print(f'  - Flow dim: {self.flow_dim}, RGB dim: {self.rgb_dim}')
+
+    def _load_features(self, clip_id: str, modality: str) -> np.ndarray:
+        """Load features for a given clip and modality"""
+        path = os.path.join(self.features_dir, f'{clip_id}_{modality}.npz')
+        with np.load(path, allow_pickle=True) as f:
+            key = next((k for k in ('features', 'arr_0') if k in f), f.files[0])
+            features = np.array(f[key], dtype=np.float32)
+        # Collapse spatial dims (T, H, W, C) -> (T, C) if present
+        if features.ndim > 2:
+            features = features.reshape(features.shape[0], -1, features.shape[-1]).mean(axis=1)
+        return features
+
+    def _compute_max_temporal_len(self) -> int:
+        """Compute maximum temporal length across all videos"""
+        max_len = 0
+        first_sample_processed = False
+
+        for clip_id in self.all_df['clip_id']:
+            rgb = self._load_features(clip_id, 'rgb')
+            flow = self._load_features(clip_id, 'flow')
+
+            # Store feature dimensions from first sample
+            if not first_sample_processed:
+                self.rgb_dim = rgb.shape[-1]
+                self.flow_dim = flow.shape[-1]
+                first_sample_processed = True
+
+            # Use min across modalities, consistent with __getitem__
+            max_len = max(max_len, min(rgb.shape[0], flow.shape[0]))
+
+        return max_len
+
+    def _pad_to_fixed_length(self, features: np.ndarray) -> np.ndarray:
+        """Pad features to fixed temporal length"""
+        T, C = features.shape
+        if T == self.temporal_len:
+            return features
+        padded = np.zeros((self.temporal_len, C), dtype=np.float32)
+        padded[:T] = features
+        return padded
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+    def __getitem__(self, idx: int) -> dict:
+        row = self.data.iloc[idx]
+        clip_id = row['clip_id']
+        action = row['clustered_action']
+        adverb = row['clustered_adverb']
+
+        rgb = self._load_features(clip_id, 'rgb')
+        flow = self._load_features(clip_id, 'flow')
+
+        # Align modalities before padding
+        min_T = min(rgb.shape[0], flow.shape[0])
+        rgb, flow = rgb[:min_T], flow[:min_T]
+
+        action_idx = self.action2idx[action]
+        adverb_idx = self.adverb2idx[adverb]
+        pair_idx = self.pair2idx[(action, adverb)]
+
+        return {
+            'clip_id': clip_id,
+            'rgb_features': torch.from_numpy(self._pad_to_fixed_length(rgb)),   # (L, C)
+            'flow_features': torch.from_numpy(self._pad_to_fixed_length(flow)),  # (L, C)
+            'action': action,
+            'adverb': adverb,
+            'action_idx': action_idx,
+            'adverb_idx': adverb_idx,
+            'pair_idx': pair_idx,
+        }

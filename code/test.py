@@ -15,7 +15,7 @@ import cv2
 
 from utils import *
 from parameters import parser
-from dataset import CompositionDataset
+from dataset import CompositionDataset, ActionAdverbDataset
 from model.model_factory import get_model
 
 
@@ -37,61 +37,106 @@ class Evaluator:
 
         self.dset = dset
 
-        # Convert text pairs to idx tensors: [('sliced', 'apple'), ('ripe',
-        # 'apple'), ...] --> torch.LongTensor([[0,1],[1,1], ...])
-        pairs = [(dset.attr2idx[attr], dset.obj2idx[obj])
-                 for attr, obj in dset.pairs]
-        self.train_pairs = [(dset.attr2idx[attr], dset.obj2idx[obj])
-                            for attr, obj in dset.train_pairs]
+        # Check if this is ActionAdverbDataset or CompositionDataset
+        is_action_adverb = isinstance(dset, ActionAdverbDataset)
+
+        # Convert text pairs to idx tensors
+        if is_action_adverb:
+            # For ActionAdverbDataset: use actions and adverbs
+            pairs = [(dset.action2idx[action], dset.adverb2idx[adverb])
+                     for action, adverb in dset.all_pairs]
+            # For ActionAdverbDataset, we don't have separate train_pairs
+            # All pairs seen in training are the unique pairs in train split
+            # We'll handle this in the dataset loading
+            self.train_pairs = pairs  # Will be updated based on training data
+            self.attr2idx = dset.action2idx  # Alias for compatibility
+            self.obj2idx = dset.adverb2idx   # Alias for compatibility
+        else:
+            # For CompositionDataset: use attributes and objects
+            pairs = [(dset.attr2idx[attr], dset.obj2idx[obj])
+                     for attr, obj in dset.pairs]
+            self.train_pairs = [(dset.attr2idx[attr], dset.obj2idx[obj])
+                                for attr, obj in dset.train_pairs]
+            self.attr2idx = dset.attr2idx
+            self.obj2idx = dset.obj2idx
+
         self.pairs = torch.LongTensor(pairs)
 
         # Mask over pairs that occur in closed world
         # Select set based on phase
-        if dset.phase == 'train':
-            print('Evaluating with train pairs')
-            test_pair_set = set(dset.train_pairs)
-            test_pair_gt = set(dset.train_pairs)
-        elif dset.phase == 'val':
-            print('Evaluating with validation pairs')
-            test_pair_set = set(dset.val_pairs + dset.train_pairs)
-            test_pair_gt = set(dset.val_pairs)
+        if is_action_adverb:
+            # For ActionAdverbDataset, we use all pairs
+            # In future, could add train/val/test pair splits
+            test_pair_set = set(dset.all_pairs)
+            test_pair_gt = set(dset.all_pairs)
+            print(f'Evaluating ActionAdverbDataset with {len(test_pair_gt)} pairs')
         else:
-            print('Evaluating with test pairs')
-            test_pair_set = set(dset.test_pairs + dset.train_pairs)
-            test_pair_gt = set(dset.test_pairs)
+            if dset.phase == 'train':
+                print('Evaluating with train pairs')
+                test_pair_set = set(dset.train_pairs)
+                test_pair_gt = set(dset.train_pairs)
+            elif dset.phase == 'val':
+                print('Evaluating with validation pairs')
+                test_pair_set = set(dset.val_pairs + dset.train_pairs)
+                test_pair_gt = set(dset.val_pairs)
+            else:
+                print('Evaluating with test pairs')
+                test_pair_set = set(dset.test_pairs + dset.train_pairs)
+                test_pair_gt = set(dset.test_pairs)
 
-        self.test_pair_dict = [
-            (dset.attr2idx[attr],
-             dset.obj2idx[obj]) for attr,
-            obj in test_pair_gt]
-        self.test_pair_dict = dict.fromkeys(self.test_pair_dict, 0)
+        if is_action_adverb:
+            self.test_pair_dict = [
+                (dset.action2idx[action],
+                 dset.adverb2idx[adverb]) for action,
+                adverb in test_pair_gt]
+            self.test_pair_dict = dict.fromkeys(self.test_pair_dict, 0)
 
-        # dict values are pair val, score, total
-        for attr, obj in test_pair_gt:
-            pair_val = dset.pair2idx[(attr, obj)]
-            key = (dset.attr2idx[attr], dset.obj2idx[obj])
-            self.test_pair_dict[key] = [pair_val, 0, 0]
+            # dict values are pair val, score, total
+            for action, adverb in test_pair_gt:
+                pair_val = dset.pair2idx[(action, adverb)]
+                key = (dset.action2idx[action], dset.adverb2idx[adverb])
+                self.test_pair_dict[key] = [pair_val, 0, 0]
+        else:
+            self.test_pair_dict = [
+                (dset.attr2idx[attr],
+                 dset.obj2idx[obj]) for attr,
+                obj in test_pair_gt]
+            self.test_pair_dict = dict.fromkeys(self.test_pair_dict, 0)
+
+            # dict values are pair val, score, total
+            for attr, obj in test_pair_gt:
+                pair_val = dset.pair2idx[(attr, obj)]
+                key = (dset.attr2idx[attr], dset.obj2idx[obj])
+                self.test_pair_dict[key] = [pair_val, 0, 0]
 
         # open world
-        if dset.open_world:
-            masks = [1 for _ in dset.pairs]
+        if is_action_adverb:
+            # For ActionAdverbDataset, use all pairs
+            masks = [1 for _ in dset.all_pairs]
+            seen_pair_set = set(dset.all_pairs)
+            mask = [1 for _ in dset.all_pairs]
         else:
-            masks = [1 if pair in test_pair_set else 0 for pair in dset.pairs]
-
-        # masks = [1 if pair in test_pair_set else 0 for pair in dset.pairs]
+            if dset.open_world:
+                masks = [1 for _ in dset.pairs]
+            else:
+                masks = [1 if pair in test_pair_set else 0 for pair in dset.pairs]
+            # Mask of seen concepts
+            seen_pair_set = set(dset.train_pairs)
+            mask = [1 if pair in seen_pair_set else 0 for pair in dset.pairs]
 
         self.closed_mask = torch.BoolTensor(masks)
-        # Mask of seen concepts
-        seen_pair_set = set(dset.train_pairs)
-        mask = [1 if pair in seen_pair_set else 0 for pair in dset.pairs]
         self.seen_mask = torch.BoolTensor(mask)
 
-        # Object specific mask over which pairs occur in the object oracle
-        # setting
+        # Object/Adverb specific mask over which pairs occur in the oracle setting
         oracle_obj_mask = []
-        for _obj in dset.objs:
-            mask = [1 if _obj == obj else 0 for attr, obj in dset.pairs]
-            oracle_obj_mask.append(torch.BoolTensor(mask))
+        if is_action_adverb:
+            for _adverb in dset.adverbs:
+                mask = [1 if _adverb == adverb else 0 for action, adverb in dset.all_pairs]
+                oracle_obj_mask.append(torch.BoolTensor(mask))
+        else:
+            for _obj in dset.objs:
+                mask = [1 if _obj == obj else 0 for attr, obj in dset.pairs]
+                oracle_obj_mask.append(torch.BoolTensor(mask))
         self.oracle_obj_mask = torch.stack(oracle_obj_mask, 0)
 
         # Decide if the model under evaluation is a manifold model or not
@@ -179,8 +224,10 @@ class Evaluator:
         obj_truth = obj_truth.to(device)
 
         # Gather scores for all relevant (a,o) pairs
+        # Handle both CompositionDataset (uses 'pairs') and ActionAdverbDataset (uses 'all_pairs')
+        pairs_attr = 'all_pairs' if isinstance(self.dset, ActionAdverbDataset) else 'pairs'
         scores = torch.stack(
-            [scores[(attr, obj)] for attr, obj in self.dset.pairs], 1
+            [scores[(attr, obj)] for attr, obj in getattr(self.dset, pairs_attr)], 1
         )  # (Batch, #pairs)
         orig_scores = scores.clone()
         results = self.generate_predictions(scores, obj_truth, bias, topk)
@@ -321,8 +368,10 @@ class Evaluator:
         obj_truth = obj_truth.to("cpu")
 
         # Gather scores for all relevant (a,o) pairs
+        # Handle both CompositionDataset (uses 'pairs') and ActionAdverbDataset (uses 'all_pairs')
+        pairs_attr = 'all_pairs' if isinstance(self.dset, ActionAdverbDataset) else 'pairs'
         base_scores = torch.stack(
-            [allpred[(attr, obj)] for attr, obj in self.dset.pairs], 1
+            [allpred[(attr, obj)] for attr, obj in getattr(self.dset, pairs_attr)], 1
         )  # (Batch, #pairs)
 
         for bias in biaslist:
@@ -369,20 +418,17 @@ class Evaluator:
 
 def predict_logits(model, dataset, config):
     """Function to predict the cosine similarities between the
-    images and the attribute-object representations. The function
-    also returns the ground truth for attributes, objects, and pair
-    of attribute-objects.
+    images/features and the attribute-object/action-adverb representations.
+    The function also returns the ground truth labels.
 
     Args:
         model (nn.Module): the model
-        text_rep (nn.Tensor): the attribute-object representations.
-        dataset (CompositionDataset): the composition dataset (validation/test)
-        device (str): the device (either cpu/cuda:0)
+        dataset: CompositionDataset or ActionAdverbDataset
         config (argparse.ArgumentParser): config/args
 
     Returns:
-        tuple: the logits, attribute labels, object labels,
-            pair attribute-object labels
+        tuple: the logits, attribute/action labels, object/adverb labels,
+            pair labels, average loss
     """
     model.eval()
     all_attr_gt, all_obj_gt, all_pair_gt = (
@@ -390,12 +436,28 @@ def predict_logits(model, dataset, config):
         [],
         [],
     )
-    attr2idx = dataset.attr2idx
-    obj2idx = dataset.obj2idx
-    # print(text_rep.shape)
-    pairs_dataset = dataset.pairs
-    pairs = torch.tensor([(attr2idx[attr], obj2idx[obj])
-                                for attr, obj in pairs_dataset]).cuda()
+
+    # Check if this is ActionAdverbDataset
+    is_action_adverb = isinstance(dataset, ActionAdverbDataset)
+
+    # Get device from model
+    device = next(model.parameters()).device
+
+    if is_action_adverb:
+        # For ActionAdverbDataset
+        all_action_indices = torch.arange(len(dataset.actions)).to(device)
+        all_adverb_indices = torch.arange(len(dataset.adverbs)).to(device)
+        pairs = None  # Not used in the same way
+    else:
+        # For CompositionDataset
+        attr2idx = dataset.attr2idx
+        obj2idx = dataset.obj2idx
+        pairs_dataset = dataset.pairs
+        pairs = torch.tensor([(attr2idx[attr], obj2idx[obj])
+                                    for attr, obj in pairs_dataset]).to(device)
+        all_action_indices = None
+        all_adverb_indices = None
+
     dataloader = DataLoader(
         dataset,
         batch_size=config.eval_batch_size,
@@ -407,11 +469,20 @@ def predict_logits(model, dataset, config):
         for idx, data in tqdm(
             enumerate(dataloader), total=len(dataloader), desc="Testing"
         ):
-            # batch_img = data[0].cuda()
-            predict = model(data, pairs)
-            logits = model.logit_infer(predict, pairs)
+            # Forward pass depends on dataset type
+            if is_action_adverb:
+                predict = model(data, all_action_indices, all_adverb_indices)
+                # For ActionAdverbModel, use pair logits directly (index 0)
+                logits = predict[0]  # pair_logits
+                attr_truth = data['action_idx']
+                obj_truth = data['adverb_idx']
+                pair_truth = data['pair_idx']
+            else:
+                predict = model(data, pairs)
+                logits = model.logit_infer(predict, pairs)
+                attr_truth, obj_truth, pair_truth = data[1], data[2], data[3]
+
             loss += model.loss_calu(predict, data).item()
-            attr_truth, obj_truth, pair_truth = data[1], data[2], data[3]
             logits = logits.cpu()
             all_logits = torch.cat([all_logits, logits], dim=0)
             all_attr_gt.append(attr_truth)
@@ -560,9 +631,11 @@ def test(
     Returns:
         dict: the result with all the metrics
     """
+    # Handle both CompositionDataset (uses 'pairs') and ActionAdverbDataset (uses 'all_pairs')
+    pairs_attr = 'all_pairs' if isinstance(test_dataset, ActionAdverbDataset) else 'pairs'
     predictions = {
         pair_name: all_logits[:, i]
-        for i, pair_name in enumerate(test_dataset.pairs)
+        for i, pair_name in enumerate(getattr(test_dataset, pairs_attr))
     }
     all_pred = [predictions]
 
